@@ -3,89 +3,90 @@ import cv2
 import numpy as np
 from PIL import Image
 
-st.set_page_config(page_title="Wasserstand Detektor", layout="centered")
-st.title("🥤 Wasserstand-Analyse Pro (Ellipsen-Modus)")
+st.set_page_config(page_title="Wasserstand Pro: Auto-Ellipse", layout="centered")
+st.title("🥤 Automatische Ellipsen-Analyse")
 
-# --- Parameter ---
-st.sidebar.header("Einstellungen")
-wasser_thresh = st.sidebar.slider("Wasser-Schwellenwert (Dunkelheit)", 0, 255, 100, help="Höher = erkennt helleren Kaffee/Tee")
-# NEU: Regler für die perspektivische Stauchung
-perspective_ratio = st.sidebar.slider("Perspektive (Blickwinkel)", 0.1, 1.0, 0.6, 0.05, help="1.0 = Kreis (Draufsicht), 0.1 = Flache Ellipse (Seitenansicht)")
+# --- SIDEBAR ---
+st.sidebar.header("Erkennungs-Parameter")
+canny_low = st.sidebar.slider("Kanten-Empfindlichkeit (Low)", 10, 100, 50)
+canny_high = st.sidebar.slider("Kanten-Empfindlichkeit (High)", 100, 300, 150)
+wasser_thresh = st.sidebar.slider("Wasser-Schwellenwert", 0, 255, 100)
 
-img_file = st.camera_input("Foto machen")
+img_file = st.camera_input("Foto der Tasse machen")
 
 if img_file is not None:
-    image = Image.open(img_file)
-    img_array = np.array(image)
-    # BGR Konvertierung für OpenCV
+    # Bild laden
+    img = Image.open(img_file)
+    img_array = np.array(img)
     img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     
-    # 1. Robuste Kreis-Erkennung (findet den Becher)
-    gray_blurred = cv2.medianBlur(gray, 5)
-    circles = cv2.HoughCircles(gray_blurred, cv2.HOUGH_GRADIENT, dp=1.2, minDist=100,
-                               param1=50, param2=30, minRadius=50, maxRadius=400)
+    # 1. Vorverarbeitung für die Kanten-Erkennung
+    blurred = cv2.GaussianBlur(gray, (7, 7), 0)
+    edged = cv2.Canny(blurred, canny_low, canny_high)
+    
+    # 2. Konturen finden
+    contours, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    best_ellipse = None
+    max_area = 0
 
-    if circles is not None:
-        circles = np.uint16(np.around(circles))
-        i = circles[0, 0]
-        center_x, center_y = i[0], i[1]
-        radius = i[2]
+    # 3. Alle Konturen prüfen und die beste Ellipse finden
+    for cnt in contours:
+        if len(cnt) >= 5:  # cv2.fitEllipse benötigt mindestens 5 Punkte
+            area = cv2.contourArea(cnt)
+            if area > 5000:  # Ignoriere zu kleine Fragmente
+                ellipse = cv2.fitEllipse(cnt)
+                # Wir suchen die größte Ellipse (meist der Becherrand)
+                if area > max_area:
+                    max_area = area
+                    best_ellipse = ellipse
 
-        # --- MASKE ERSTELLEN (Bleibt basierend auf dem Kreis) ---
-        # Wir nutzen den Kreis für die Maske, da dies am robustesten ist,
-        # um den Innenraum zu isolieren.
-        mask = np.zeros_like(gray)
-        cv2.circle(mask, (center_x, center_y), radius, 255, -1)
-        masked_gray = cv2.bitwise_and(gray, mask)
-
-        # Bereich (ROI) ausschneiden
-        y_s, y_e = max(0, center_y - radius), min(gray.shape[0], center_y + radius)
-        x_s, x_e = max(0, center_x - radius), min(gray.shape[1], center_x + radius)
-        roi = masked_gray[y_s:y_e, x_s:x_e]
-
+    if best_ellipse:
+        # Gelbe Ellipse für den Becherrand zeichnen
+        cv2.ellipse(img_array, best_ellipse, (255, 255, 0), 5)
+        
         # --- WASSERSTAND ANALYSE ---
-        # Oberste 15% des Kreises ignorieren (Becherrand-Schatten)
-        margin = int(roi.shape[0] * 0.15)
-        search_area = roi[margin:, :]
+        # Zentrum und Achsen der gefundenen Ellipse
+        (xc, yc), (d1, d2), angle = best_ellipse
+        r_eff = max(d1, d2) / 2
         
-        # Schwellenwert anwenden
-        _, binary = cv2.threshold(search_area, wasser_thresh, 255, cv2.THRESH_BINARY_INV)
+        # Maske erstellen, um nur IM Becher zu suchen
+        mask = np.zeros_like(gray)
+        cv2.ellipse(mask, best_ellipse, 255, -1)
+        masked_gray = cv2.bitwise_and(gray, mask)
         
-        row_sums = np.sum(binary, axis=1)
-        # Eine Zeile gilt als Wasserlinie, wenn sie zu >25% dunkel ist
-        water_pos = np.where(row_sums > (binary.shape[1] * 0.25))[0]
-
-        # --- VISUALISIERUNG MIT ELLIPSEN ---
-        # Definition der Ellipsen-Achsen basierend auf Radius und Perspektive
-        # Hauptachse = Radius, Nebenachse = Radius * Perspektiv-Faktor
-        axes_length = (radius, int(radius * perspective_ratio))
-        angle = 0 # Drehung der Ellipse (0 Grad bei horizontalem Foto)
-
-        # 1. GELBE ELLIPSE (Becherrand) statt Kreis zeichnen
-        # Wir zeichnen eine volle Ellipse (0 bis 360 Grad)
-        cv2.ellipse(img_array, (center_x, center_y), axes_length, angle, 0, 360, (255, 255, 0), 4)
+        # Bereich unterhalb des oberen Randes prüfen
+        # Wir ignorieren die obersten 20% der Ellipse (Schaum/Schatten)
+        y_start = int(yc - r_eff * 0.6)
+        y_end = int(yc + r_eff)
+        x_start = int(xc - r_eff)
+        x_end = int(xc + r_eff)
         
-        if len(water_pos) > 0:
-            # Y-Position der Wasserlinie berechnen
-            top_water_rel = water_pos[0] + margin
-            top_water_abs = y_s + top_water_rel
+        roi = masked_gray[max(0, y_start):y_end, max(0, x_start):x_end]
+        
+        if roi.size > 0:
+            _, binary = cv2.threshold(roi, wasser_thresh, 255, cv2.THRESH_BINARY_INV)
+            row_sums = np.sum(binary, axis=1)
+            water_indices = np.where(row_sums > (binary.shape[1] * 0.3))[0]
             
-            # 2. BLAUE ELLIPSE (Wasserstand) statt Linie
-            # Wir zeichnen nur den vorderen Bogen (0 bis 180 Grad), das sieht echter aus.
-            # Das Zentrum der Wasser-Ellipse liegt auf der gleichen X-Achse, aber tiefer auf Y.
-            water_center = (center_x, top_water_abs)
-            
-            # Optional: Die Wasser-Ellipse etwas kleiner machen, da der Becher nach unten enger wird.
-            # Hier vereinfacht nutzen wir die gleichen Achsen wie oben.
-            cv2.ellipse(img_array, water_center, axes_length, angle, 0, 180, (0, 0, 255), 4)
-            
-            # Prozentberechnung (linear basierend auf der Höhe im Kreis)
-            prozent = 100 - (top_water_rel / (2 * radius) * 100)
-            st.metric("Füllstand (ca.)", f"{max(0, min(100, prozent)):.1f} %")
-        else:
-            st.metric("Füllstand", "Leer / Nicht erkannt")
-
-        st.image(img_array, caption="Analyse mit Ellipsen")
+            if len(water_indices) > 0:
+                # Wasserlinie gefunden
+                rel_y = water_indices[0]
+                abs_y = y_start + rel_y
+                
+                # Blaue Ellipse (Wasserfläche) zeichnen
+                # Wir nehmen die gleiche Breite/Winkel wie oben, aber tiefer
+                water_ellipse = ((xc, abs_y), (d1 * 0.9, d2 * 0.9), angle)
+                cv2.ellipse(img_array, water_ellipse, (0, 0, 255), 4)
+                
+                # Füllstandsberechnung
+                height_total = y_end - y_start
+                level = 100 - (rel_y / height_total * 100)
+                st.metric("Füllstand automatisch", f"{max(0, min(100, level)):.1f} %")
+            else:
+                st.info("Keine Wasserfläche im Becher erkannt.")
+        
+        st.image(img_array, caption="Automatische Ellipsen-Erkennung")
     else:
-        st.warning("Kein Becher erkannt. Bitte mittig positionieren.")
+        st.warning("Konnte keine klare Ellipse finden. Versuche den Becher besser auszuleuchten.")
