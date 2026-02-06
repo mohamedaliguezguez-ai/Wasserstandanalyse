@@ -3,81 +3,128 @@ import cv2
 import numpy as np
 from PIL import Image
 
-st.set_page_config(page_title="Wasserstand Pro", layout="wide")
-st.title("🥤 Intelligente Becher-Analyse")
+# --- KONFIGURATION ---
+st.set_page_config(page_title="Kreis- & Liniendetektor", layout="wide")
+st.title("⭕📏 Universal-Detektor: Kreise und Linien")
+st.write("Lade ein Bild hoch. Das Programm versucht, alle Kreise (Grün) und Linien (Blau) zu finden.")
 
-# --- SIDEBAR FÜR DIE FEINEINSTELLUNG ---
-st.sidebar.header("Analyse-Tuning")
-kanten_starke = st.sidebar.slider("Kanten-Filter (Becher finden)", 10, 250, 80)
-wasser_limit = st.sidebar.slider("Flüssigkeits-Kontrast", 0, 255, 110)
+# --- SIDEBAR EINSTELLUNGEN ---
+st.sidebar.header("⚙️ Einstellungen")
 
-img_file = st.camera_input("Foto der Tasse")
+st.sidebar.subheader("1. Vorverarbeitung (Wichtig!)")
+# Canny ist entscheidend für Linien und hilft auch bei Kreisen
+canny_thresh = st.sidebar.slider(
+    "Kanten-Schwelle (Canny)", 
+    50, 300, 150, 
+    help="Bestimmt, was als 'scharfe Kante' gilt. Höher = weniger Kanten."
+)
 
-if img_file:
-    img = Image.open(img_file)
-    img_array = np.array(img)
-    img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+st.sidebar.subheader("2. Kreise (Hough Circles)")
+# Parameter für cv2.HoughCircles
+dp = st.sidebar.slider("Auflösung (dp)", 0.5, 2.0, 1.2, 0.1, help="Kleiner = genauere Suche, aber langsamer.")
+min_dist = st.sidebar.slider("Min. Abstand zwischen Kreisen", 10, 200, 50)
+param2 = st.sidebar.slider(
+    "Kreis-Empfindlichkeit (param2)", 
+    10, 150, 50, 
+    help="DER wichtigste Regler für Kreise. Niedriger = findet mehr (auch falsche) Kreise. Höher = findet nur sehr perfekte Kreise."
+)
+min_radius = st.sidebar.slider("Min. Radius", 0, 100, 20)
+max_radius = st.sidebar.slider("Max. Radius", 50, 500, 200)
 
-    # 1. Kanten finden & Silhouette vorbereiten
-    blurred = cv2.GaussianBlur(gray, (7, 7), 0)
-    edged = cv2.Canny(blurred, kanten_starke // 2, kanten_starke)
+st.sidebar.subheader("3. Linien (Hough Lines P)")
+# Parameter für cv2.HoughLinesP
+line_thresh = st.sidebar.slider(
+    "Linien-Schwelle (Votes)", 
+    10, 200, 80,
+    help="Wie viele 'Punkte' müssen auf einer Linie liegen, damit sie erkannt wird. Niedriger = mehr Linien."
+)
+min_line_len = st.sidebar.slider("Min. Linienlänge", 10, 200, 50)
+max_line_gap = st.sidebar.slider(
+    "Max. Lücke in Linie", 
+    1, 50, 20,
+    help="Erlaubt Unterbrechungen in einer Linie. Größer = verbindet gestrichelte Linien eher."
+)
+
+
+# --- HAUPTPROGRAMM ---
+uploaded_file = st.file_uploader("Wähle ein Bild aus...", type=["jpg", "jpeg", "png"])
+
+if uploaded_file is not None:
+    # 1. Bild laden und vorbereiten
+    image_pil = Image.open(uploaded_file)
+    img_np = np.array(image_pil)
+    # Konvertieren für OpenCV (RGB -> BGR)
+    img_output = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+    # Graustufen für die Analyse
+    gray = cv2.cvtColor(img_output, cv2.COLOR_BGR2GRAY)
     
-    # 2. Konturen suchen
-    contours, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # Rauschunterdrückung (wichtig, damit nicht jeder Krümel als Kante erkannt wird)
+    blurred = cv2.medianBlur(gray, 5)
+
+    # --- KREIS-ERKENNUNG ---
+    circles = cv2.HoughCircles(
+        blurred, 
+        cv2.HOUGH_GRADIENT, 
+        dp=dp, 
+        minDist=min_dist,
+        param1=canny_thresh, # Benutzt den Canny-Wert für die interne Kantenerkennung
+        param2=param2, 
+        minRadius=min_radius, 
+        maxRadius=max_radius
+    )
+
+    circle_count = 0
+    if circles is not None:
+        circles = np.uint16(np.around(circles))
+        circle_count = len(circles[0, :])
+        for i in circles[0, :]:
+            center = (i[0], i[1])
+            radius = i[2]
+            # Kreisumriss zeichnen (GRÜN, Dicke 3)
+            cv2.circle(img_output, center, radius, (0, 255, 0), 3)
+            # Mittelpunkt zeichnen (ROT, Dicke 5)
+            cv2.circle(img_output, center, 3, (0, 0, 255), 5)
+
+    # --- LINIEN-ERKENNUNG ---
+    # Für Linien brauchen wir zuerst ein reines Kantenbild (Canny)
+    edges = cv2.Canny(blurred, canny_thresh // 2, canny_thresh)
     
-    silhouette_view = np.zeros_like(gray) # Ansicht für die Silhouette
-    found_cup = False
+    lines = cv2.HoughLinesP(
+        edges, 
+        1, # rho (Abstandsauflösung in Pixeln)
+        np.pi/180, # theta (Winkelauflösung in Bogenmaß)
+        threshold=line_thresh, 
+        minLineLength=min_line_len, 
+        maxLineGap=max_line_gap
+    )
 
-    if contours:
-        # Die größte geschlossene Form suchen
-        cup_contour = max(contours, key=cv2.contourArea)
-        
-        # Nur weitermachen, wenn die Form groß genug ist (kein Rauschen)
-        if cv2.contourArea(cup_contour) > 5000:
-            found_cup = True
-            cv2.drawContours(silhouette_view, [cup_contour], -1, 255, -1)
-            
-            if len(cup_contour) >= 5:
-                # Becher-Ellipse berechnen
-                ellipse = cv2.fitEllipse(cup_contour)
-                (xc, yc), (d1, d2), angle = ellipse
-                cv2.ellipse(img_array, ellipse, (255, 255, 0), 5)
+    line_count = 0
+    if lines is not None:
+        line_count = len(lines)
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            # Linie zeichnen (BLAU, Dicke 3)
+            cv2.line(img_output, (x1, y1), (x2, y2), (255, 0, 0), 3)
 
-                # --- WASSER-SUCHE (Nur innerhalb der Silhouette) ---
-                mask = np.zeros_like(gray)
-                cv2.drawContours(mask, [cup_contour], -1, 255, -1)
-                roi = cv2.bitwise_and(gray, mask)
+    # --- ANZEIGE ---
+    # Zurückkonvertieren nach RGB für Streamlit
+    img_rgb_final = cv2.cvtColor(img_output, cv2.COLOR_BGR2RGB)
 
-                # Suchbereich (oberste 20% ignorieren)
-                y_start = int(yc - (max(d1, d2) / 2) * 0.7)
-                y_end = int(yc + (max(d1, d2) / 2))
-                search_area = roi[max(0, y_start):y_end, :]
-                
-                if search_area.size > 0:
-                    _, binary = cv2.threshold(search_area, wasser_limit, 255, cv2.THRESH_BINARY_INV)
-                    row_sums = np.sum(binary, axis=1)
-                    water_line = np.where(row_sums > (binary.shape[1] * 0.3))[0]
-
-                    if len(water_line) > 0:
-                        y_abs = y_start + water_line[0]
-                        # Wasser-Ellipse zeichnen
-                        water_ell = ((xc, y_abs), (d1 * 0.9, d2 * 0.4), angle)
-                        cv2.ellipse(img_array, water_ell, (0, 0, 255), 4)
-                        
-                        level = 100 - (water_line[0] / (y_end - y_start) * 100)
-                        st.metric("Füllstand", f"{max(0, min(100, level)):.1f} %")
-
-    # --- ANZEIGE DER ERGEBNISSE ---
-    col1, col2 = st.columns(2)
+    col1, col2 = st.columns([1, 2])
     with col1:
-        st.subheader("Analyse")
-        st.image(img_array)
+        st.metric("Gefundene Kreise", circle_count)
+        st.metric("Gefundene Linien", line_count)
+        st.markdown("""
+        **Legende:**
+        * 🟢 **Grün:** Erkannte Kreise
+        * 🔴 **Rot:** Kreismittelpunkte
+        * 🔵 **Blau:** Erkannte Linien
+        """)
+        with st.expander("Kantenbild sehen (Debug)"):
+            st.image(edges, caption="Canny Edges (Basis für Linien)")
+
     with col2:
-        st.subheader("Was der Computer sieht (Silhouette)")
-        st.image(silhouette_view)
-        if not found_cup:
-            st.error("Keine Silhouette erkannt! Tipp: Stell den Becher auf einen dunklen Untergrund.")
+        st.image(img_rgb_final, caption="Endergebnis", use_container_width=True)
 
 else:
-    st.info("Bitte mache ein Foto. Achte auf guten Kontrast (z.B. dunkler Tisch).")
+    st.info("Bitte lade ein Bild hoch, um zu beginnen.")
