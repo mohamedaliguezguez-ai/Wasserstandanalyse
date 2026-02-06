@@ -41,31 +41,35 @@ if img_file:
         if len(cup_contour) >= 5:
             ellipse = cv2.fitEllipse(cup_contour)
             (xc, yc), (d1, d2), angle = ellipse
-            cv2.ellipse(img_array, ellipse, (255, 255, 0), 5) # Gelber Rand
-
-            # Wasser-Suche (innerhalb der Silhouette)
-            mask = np.zeros_like(gray)
-            cv2.drawContours(mask, [cup_contour], -1, 255, -1)
-            roi = cv2.bitwise_and(gray, mask)
             
-            # Analyse-Bereich (oberen Rand ignorieren)
-            y_start = int(yc - (max(d1, d2) / 2) * 0.7)
-            y_end = int(yc + (max(d1, d2) / 2))
-            search_area = roi[max(0, y_start):y_end, :]
-            
-            if search_area.size > 0:
-                _, binary = cv2.threshold(search_area, wasser_limit, 255, cv2.THRESH_BINARY_INV)
-                row_sums = np.sum(binary, axis=1)
-                water_line = np.where(row_sums > (binary.shape[1] * 0.3))[0]
+            # Sicherheitscheck: Nur zeichnen, wenn Werte gültig sind
+            if d1 > 0 and d2 > 0:
+                cv2.ellipse(img_array, ellipse, (255, 255, 0), 5) # Gelber Rand
 
-                if len(water_line) > 0:
-                    y_abs = y_start + water_line[0]
-                    # Wasser-Ellipse zeichnen (Blau)
-                    water_ell = ((xc, y_abs), (d1 * 0.9, d2 * 0.4), angle)
-                    cv2.ellipse(img_array, water_ell, (0, 0, 255), 4)
-                    
-                    level = 100 - (water_line[0] / (y_end - y_start) * 100)
-                    st.metric("Füllstand", f"{max(0, min(100, level)):.1f} %")
+                # Wasser-Suche (innerhalb der Silhouette)
+                mask = np.zeros_like(gray)
+                cv2.drawContours(mask, [cup_contour], -1, 255, -1)
+                roi = cv2.bitwise_and(gray, mask)
+                
+                # Analyse-Bereich (oberen Rand ignorieren)
+                y_start = int(yc - (max(d1, d2) / 2) * 0.7)
+                y_end = int(yc + (max(d1, d2) / 2))
+                search_area = roi[max(0, y_start):y_end, :]
+                
+                if search_area.size > 0:
+                    _, binary = cv2.threshold(search_area, wasser_limit, 255, cv2.THRESH_BINARY_INV)
+                    row_sums = np.sum(binary, axis=1)
+                    water_line = np.where(row_sums > (binary.shape[1] * 0.3))[0]
+
+                    if len(water_line) > 0:
+                        y_abs = y_start + water_line[0]
+                        # Wasser-Ellipse zeichnen (Blau)
+                        # Wir nutzen eine etwas flachere Form für die Wasseroberfläche
+                        water_ell = ((xc, y_abs), (d1 * 0.9, d2 * 0.4), angle)
+                        cv2.ellipse(img_array, water_ell, (0, 0, 255), 4)
+                        
+                        level = 100 - (water_line[0] / (y_end - y_start) * 100)
+                        st.metric("Füllstand", f"{max(0, min(100, level)):.1f} %")
 
     # --- ANZEIGE DER ERGEBNISSE ---
     col1, col2, col3 = st.columns(3)
