@@ -3,82 +3,86 @@ import cv2
 import numpy as np
 from PIL import Image
 
-st.title("🥤 3D-Zylinder Füllstand-Analyse")
-st.write("Erkennt den Becher durch Analyse von Rand, Boden und Seitenwänden.")
+st.set_page_config(page_title="Silhouette Mess-App", layout="wide")
+st.title("🔬 Becher-Analyse mit Silhouetten-Ansicht")
 
 # --- SIDEBAR ---
 st.sidebar.header("Analyse-Tuning")
-sens = st.sidebar.slider("Kanten-Stärke", 20, 200, 100)
-wasser_limit = st.sidebar.slider("Flüssigkeit-Dunkelheit", 0, 255, 120)
+kanten_empf = st.sidebar.slider("Kanten-Empfindlichkeit", 10, 255, 100, help="Niedriger = mehr Details, Höher = nur starke Kanten")
+wasser_limit = st.sidebar.slider("Flüssigkeits-Kontrast", 0, 255, 110)
 
-img_file = st.camera_input("Foto machen")
+img_file = st.camera_input("Foto der Tasse")
 
-if img_file is not None:
+if img_file:
+    # Bildvorbereitung
     img = Image.open(img_file)
     img_array = np.array(img)
     img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
 
-    # 1. Kanten finden (Canny)
+    # 1. Kanten-Bild erstellen (Canny)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    edged = cv2.Canny(blurred, sens // 2, sens)
-
-    # 2. Die größte Kontur finden (Der gesamte Becher)
+    edged = cv2.Canny(blurred, kanten_empf // 2, kanten_empf)
+    
+    # 2. Konturen finden
     contours, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
+    # Platzhalter für die Silhouette
+    silhouette_view = np.zeros_like(gray)
+    
     if contours:
-        # Die größte Fläche nehmen
-        cup_cnt = max(contours, key=cv2.contourArea)
+        # Die größte Form finden (der Becher)
+        cup_contour = max(contours, key=cv2.contourArea)
         
-        # 3. Eckpunkte bestimmen (Oben, Unten, Seiten)
-        # Wir nutzen ein umschließendes Rechteck, um die Extrempunkte zu finden
-        x, y, w, h = cv2.boundingRect(cup_cnt)
+        # Silhouette zeichnen (Weiß auf Schwarz)
+        cv2.drawContours(silhouette_view, [cup_contour], -1, 255, -1)
         
-        # Wir definieren die Geometrie
-        top_y = y
-        bottom_y = y + h
-        left_x = x
-        right_x = x + w
-        center_x = x + w // 2
+        # Ellipse an die Silhouette anpassen
+        if len(cup_contour) >= 5:
+            ellipse = cv2.fitEllipse(cup_contour)
+            (xc, yc), (d1, d2), angle = ellipse
+            cv2.ellipse(img_array, ellipse, (255, 255, 0), 5) # Gelber Rand
 
-        # 4. Ellipsen konstruieren
-        # Obere Ellipse (Rand)
-        rim_ellipse = ((center_x, top_y + 20), (w, 40), 0) # Schätzung der Neigung
-        # Untere Ellipse (Boden)
-        base_ellipse = ((center_x, bottom_y - 20), (w * 0.8, 30), 0)
+            # Wasser-Suche (innerhalb der Silhouette)
+            mask = np.zeros_like(gray)
+            cv2.drawContours(mask, [cup_contour], -1, 255, -1)
+            roi = cv2.bitwise_and(gray, mask)
+            
+            # Analyse-Bereich (oberen Rand ignorieren)
+            y_start = int(yc - (max(d1, d2) / 2) * 0.7)
+            y_end = int(yc + (max(d1, d2) / 2))
+            search_area = roi[max(0, y_start):y_end, :]
+            
+            if search_area.size > 0:
+                _, binary = cv2.threshold(search_area, wasser_limit, 255, cv2.THRESH_BINARY_INV)
+                row_sums = np.sum(binary, axis=1)
+                water_line = np.where(row_sums > (binary.shape[1] * 0.3))[0]
 
-        # Zeichnen der Struktur (Gelb)
-        cv2.ellipse(img_array, rim_ellipse, (255, 255, 0), 3) # Oben
-        cv2.ellipse(img_array, base_ellipse, (255, 255, 0), 2) # Unten
-        cv2.line(img_array, (left_x, top_y + 20), (left_x + 20, bottom_y - 20), (255, 255, 0), 2) # Seite Links
-        cv2.line(img_array, (right_x, top_y + 20), (right_x - 20, bottom_y - 20), (255, 255, 0), 2) # Seite Rechts
+                if len(water_line) > 0:
+                    y_abs = y_start + water_line[0]
+                    # Wasser-Ellipse zeichnen (Blau)
+                    water_ell = ((xc, y_abs), (d1 * 0.9, d2 * 0.4), angle)
+                    cv2.ellipse(img_array, water_ell, (0, 0, 255), 4)
+                    
+                    level = 100 - (water_line[0] / (y_end - y_start) * 100)
+                    st.metric("Füllstand", f"{max(0, min(100, level)):.1f} %")
 
-        # 5. WASSERSTAND IN DIESEM BEREICH SUCHEN
-        mask = np.zeros_like(gray)
-        cv2.drawContours(mask, [cup_cnt], -1, 255, -1)
-        roi_gray = cv2.bitwise_and(gray, mask)
+    # --- ANZEIGE DER ERGEBNISSE ---
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.subheader("1. Analyse")
+        st.image(img_array, use_container_width=True)
         
-        # Nur im mittleren Bereich des Bechers suchen
-        search_roi = roi_gray[top_y + 40 : bottom_y - 10, left_x : right_x]
+    with col2:
+        st.subheader("2. Kanten (Canny)")
+        st.image(edged, use_container_width=True)
+        st.caption("Alle Linien, die das Handy erkennt.")
         
-        if search_roi.size > 0:
-            _, binary = cv2.threshold(search_roi, wasser_limit, 255, cv2.THRESH_BINARY_INV)
-            row_sums = np.sum(binary, axis=1)
-            water_idx = np.where(row_sums > (binary.shape[1] * 0.3))[0]
+    with col3:
+        st.subheader("3. Silhouette")
+        st.image(silhouette_view, use_container_width=True)
+        st.caption("Das ist die Form, die als Becher zählt.")
 
-            if len(water_idx) > 0:
-                water_y_abs = top_y + 40 + water_idx[0]
-                # Wasser-Ellipse zeichnen (Blau)
-                # Breite wird proportional zum Füllstand schmaler (falls konisch)
-                width_factor = 1.0 - (water_idx[0] / h * 0.2) 
-                water_ell = ((center_x, water_y_abs), (int(w * width_factor), 35), 0)
-                cv2.ellipse(img_array, water_ell, (0, 0, 255), 4)
-
-                # Berechnung des Füllstands h
-                # $h_{rel} = 1 - \frac{y_{water} - y_{top}}{y_{bottom} - y_{top}}$
-                level = 100 - (water_idx[0] / (bottom_y - top_y - 50) * 100)
-                st.metric("Füllstand", f"{max(0, min(100, level)):.1f} %")
-
-        st.image(img_array, caption="Geometrische 3-Punkt Analyse")
-    else:
-        st.error("Konnte keine Becher-Silhouette finden. Bitte Hintergrund prüfen.")
+else:
+    st.info("Bitte mache ein Foto, um die Silhouette zu sehen.")
